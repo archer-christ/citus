@@ -179,7 +179,7 @@ typedef struct Task
 	bool upsertQuery;              /* only applies to modify tasks */
 	char replicationModel;         /* only applies to modify tasks */
 
-	bool insertSelectQuery;
+	bool modifyWithMultipleTableQuery;
 	List *relationShardList;
 
 	List *rowValuesLists;          /* rows to use when building multi-row INSERT */
@@ -327,6 +327,10 @@ extern bool TaskListMember(const List *taskList, const Task *task);
 extern List * TaskListDifference(const List *list1, const List *list2);
 extern List * AssignAnchorShardTaskList(List *taskList);
 extern List * FirstReplicaAssignTaskList(List *taskList);
+extern List * QueryPushdownSqlTaskList(Query *query, uint64 jobId,
+									   RelationRestrictionContext *
+									   relationRestrictionContext,
+									   List *prunedRelationShardList, TaskType taskType);
 
 
 #endif   /* MULTI_PHYSICAL_PLANNER_H */

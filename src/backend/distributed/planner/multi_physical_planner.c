@@ -126,10 +126,6 @@ static ArrayType * SplitPointObject(ShardInterval **shardIntervalArray,
 static bool DistributedPlanRouterExecutable(DistributedPlan *distributedPlan);
 static Job * BuildJobTreeTaskList(Job *jobTree,
 								  PlannerRestrictionContext *plannerRestrictionContext);
-static List * QueryPushdownSqlTaskList(Query *query, uint64 jobId,
-									   RelationRestrictionContext *
-									   relationRestrictionContext,
-									   List *prunedRelationShardList, TaskType taskType);
 static void ErrorIfUnsupportedShardDistribution(Query *query);
 static Task * QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 									  RelationRestrictionContext *restrictionContext,
@@ -2284,6 +2280,25 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 	List *selectPlacementList = NIL;
 	uint64 jobId = INVALID_JOB_ID;
 	uint64 anchorShardId = INVALID_SHARD_ID;
+	bool isModifyWithSubselect = false;
+	RangeTblEntry *resultRangeTable = NULL;
+	Oid resultRelationOid = InvalidOid;
+
+	if (UpdateOrDeleteQuery(originalQuery) && list_length(
+			restrictionContext->relationRestrictionList) > 1)
+	{
+		isModifyWithSubselect = true;
+	}
+
+	/*
+	 * If it is a modify query with sub-select, we need to have result relation
+	 * to obtain right lock on it.
+	 */
+	if (isModifyWithSubselect)
+	{
+		resultRangeTable = rt_fetch(originalQuery->resultRelation, originalQuery->rtable);
+		resultRelationOid = resultRangeTable->relid;
+	}
 
 	/*
 	 * Find the relevant shard out of each relation for this task.
@@ -2314,8 +2329,22 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 			/* use the shard from a specific index */
 			shardInterval = cacheEntry->sortedShardIntervalArray[shardIndex];
 
-			/* use a shard from a distributed table as the anchor shard */
-			anchorShardId = shardInterval->shardId;
+			/*
+			 * We take row exclusive lock for result relation and access share
+			 * lock for other relations in the modify executor.
+			 */
+			if (isModifyWithSubselect)
+			{
+				if (relationId == resultRelationOid)
+				{
+					anchorShardId = shardInterval->shardId;
+				}
+			}
+			else
+			{
+				/* use a shard from a distributed table as the anchor shard */
+				anchorShardId = shardInterval->shardId;
+			}
 		}
 
 		taskShardList = lappend(taskShardList, list_make1(shardInterval));
@@ -2345,8 +2374,11 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 	 * that the query string is generated as (...) AND (...) as opposed to
 	 * (...), (...).
 	 */
-	taskQuery->jointree->quals =
-		(Node *) make_ands_explicit((List *) taskQuery->jointree->quals);
+	if (taskQuery->jointree->quals != NULL && IsA(taskQuery->jointree->quals, List))
+	{
+		taskQuery->jointree->quals = (Node *) make_ands_explicit(
+			(List *) taskQuery->jointree->quals);
+	}
 
 	/* and generate the full query string */
 	pg_get_query_def(taskQuery, queryString);
