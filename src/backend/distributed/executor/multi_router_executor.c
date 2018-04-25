@@ -442,6 +442,13 @@ CitusModifyBeginScan(CustomScanState *node, EState *estate, int eflags)
 		RebuildQueryStrings(jobQuery, taskList);
 	}
 
+	/*
+	 * Modify tasks are always assigned using first-replica policy. Since tasks
+	 * are also sorted by anchor shard id within this function, we do not need
+	 * to sort them again while obtaining locks.
+	 */
+	taskList = FirstReplicaAssignTaskList(taskList);
+
 	/* prevent concurrent placement changes */
 	AcquireMetadataLocks(taskList);
 
@@ -451,7 +458,6 @@ CitusModifyBeginScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	LockPartitionsInRelationList(distributedPlan->relationIdList, AccessShareLock);
 
-	/* modify tasks are always assigned using first-replica policy */
 	workerJob->taskList = FirstReplicaAssignTaskList(taskList);
 }
 
