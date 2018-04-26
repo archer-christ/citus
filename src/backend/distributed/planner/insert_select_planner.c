@@ -259,7 +259,7 @@ CreateDistributedInsertSelectPlan(Query *originalQuery,
 		/* add the task if it could be created */
 		if (modifyTask != NULL)
 		{
-			modifyTask->modifyWithMultipleTableQuery = true;
+			modifyTask->modifyWithSubquery = true;
 
 			sqlTaskList = lappend(sqlTaskList, modifyTask);
 		}

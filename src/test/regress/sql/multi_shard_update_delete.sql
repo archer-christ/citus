@@ -135,16 +135,22 @@ INSERT INTO append_stage_table VALUES(1,3);
 INSERT INTO append_stage_table VALUES(3,2);
 INSERT INTO append_stage_table VALUES(5,4);
 
+CREATE TABLE append_stage_table_2(id int, col_2 int);
+INSERT INTO append_stage_table_2 VALUES(8,3);
+INSERT INTO append_stage_table_2 VALUES(9,2);
+INSERT INTO append_stage_table_2 VALUES(10,4);
+
 CREATE TABLE test_append_table(id int, col_2 int);
 SELECT create_distributed_table('test_append_table','id','append');
 SELECT master_create_empty_shard('test_append_table');
 SELECT * FROM master_append_table_to_shard(1440010, 'append_stage_table', 'localhost', :master_port);
 SELECT master_create_empty_shard('test_append_table') AS new_shard_id;
-SELECT * FROM master_append_table_to_shard(1440011, 'append_stage_table', 'localhost', :master_port);
+SELECT * FROM master_append_table_to_shard(1440011, 'append_stage_table_2', 'localhost', :master_port);
 UPDATE test_append_table SET col_2 = 5;
 SELECT * FROM test_append_table;
 
 DROP TABLE append_stage_table;
+DROP TABLE append_stage_table_2;
 DROP TABLE test_append_table;
 
 -- Update multi shard of partitioned distributed table
@@ -446,6 +452,14 @@ WHERE  user_id IN
         INTERSECT
         SELECT user_id
         FROM   events_test_table);
+
+-- Reference tables can not locate on the outer part of the outer join
+UPDATE users_test_table
+SET value_1 = 4
+WHERE user_id IN
+    (SELECT DISTINCT e2.user_id
+     FROM users_reference_copy_table
+     LEFT JOIN users_test_table e2 ON (e2.user_id = users_reference_copy_table.value_1)) RETURNING *;
 
 -- Volatile functions are also not supported
 UPDATE users_test_table

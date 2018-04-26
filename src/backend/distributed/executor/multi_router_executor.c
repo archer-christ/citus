@@ -336,7 +336,7 @@ RequiresConsistentSnapshot(Task *task)
 {
 	bool requiresIsolation = false;
 
-	if (!task->modifyWithMultipleTableQuery)
+	if (!task->modifyWithSubquery)
 	{
 		/*
 		 * Other commands do not read from other shards.
@@ -458,7 +458,7 @@ CitusModifyBeginScan(CustomScanState *node, EState *estate, int eflags)
 	 */
 	LockPartitionsInRelationList(distributedPlan->relationIdList, AccessShareLock);
 
-	workerJob->taskList = FirstReplicaAssignTaskList(taskList);
+	workerJob->taskList = taskList;
 }
 
 

@@ -148,8 +148,9 @@ static List * SingleShardSelectTaskList(Query *query, List *relationShardList,
 										List *placementList, uint64 shardId);
 static List * SingleShardModifyTaskList(Query *query, List *relationShardList,
 										List *placementList, uint64 shardId);
-static List * MultiShardModifyTaskList(Query *originalQuery, List *relationShardList,
-									   bool requiresMasterEvaluation);
+
+/*static List * MultiShardModifyTaskList(Query *originalQuery, List *relationShardList, */
+/*									   bool requiresMasterEvaluation); */
 
 /*
  * CreateRouterPlan attempts to create a router executor plan for the given
@@ -697,8 +698,9 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 		if (plannerRestrictionContext == NULL)
 		{
 			return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-								 "cannot run multi shard modify query with master_modify_multiple_shard",
-								 "Send your query directly.", NULL);
+								 "cannot run multi shard modify query with master_modify_multiple_shard when the query involves subquery or join",
+								 "Execute the query without using master_modify_multiple_shard()",
+								 NULL);
 		}
 
 		/* If it is a multi-shard modify query with multiple tables */
@@ -712,16 +714,7 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 			bool allReferenceTable =
 				plannerRestrictionContext->relationRestrictionContext->allReferenceTables;
 
-			if (!AllDistributionKeysInQueryAreEqual(originalQuery,
-													plannerRestrictionContext))
-			{
-				errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-											 "cannot perform distributed planning for the given "
-											 "modification",
-											 "Joins are not supported in distributed "
-											 "modifications.", NULL);
-			}
-			else if (resultPartitionMethod == DISTRIBUTE_BY_NONE && !allReferenceTable)
+			if (resultPartitionMethod == DISTRIBUTE_BY_NONE && !allReferenceTable)
 			{
 				errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
 											 "only reference tables may be queried when targeting "
@@ -1386,7 +1379,7 @@ CreateTask(TaskType taskType)
 	task->upsertQuery = false;
 	task->replicationModel = REPLICATION_MODEL_INVALID;
 
-	task->modifyWithMultipleTableQuery = false;
+	task->modifyWithSubquery = false;
 	task->relationShardList = NIL;
 
 	return task;
@@ -1481,27 +1474,23 @@ RouterJob(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionCon
 	}
 	else if (isMultiShardModifyQuery)
 	{
+		job->taskList = QueryPushdownSqlTaskList(originalQuery, 0,
+												 plannerRestrictionContext->
+												 relationRestrictionContext,
+												 relationShardList, MODIFY_TASK,
+												 requiresMasterEvaluation);
+
 		/* If it is a modify task with multiple tables */
 		if (list_length(
 				plannerRestrictionContext->relationRestrictionContext->
 				relationRestrictionList) > 1)
 		{
 			ListCell *taskCell = NULL;
-			job->taskList = QueryPushdownSqlTaskList(originalQuery, 0,
-													 plannerRestrictionContext->
-													 relationRestrictionContext,
-													 relationShardList, MODIFY_TASK);
-
 			foreach(taskCell, job->taskList)
 			{
 				Task *task = (Task *) lfirst(taskCell);
-				task->modifyWithMultipleTableQuery = true;
+				task->modifyWithSubquery = true;
 			}
-		}
-		else
-		{
-			job->taskList = MultiShardModifyTaskList(originalQuery, relationShardList,
-													 requiresMasterEvaluation);
 		}
 	}
 	else
@@ -1540,41 +1529,41 @@ SingleShardSelectTaskList(Query *query, List *relationShardList, List *placement
 /*
  * MultiShardModifyTaskList generates task list for multi shard update/delete
  * queries.
- */
-static List *
-MultiShardModifyTaskList(Query *originalQuery, List *relationShardList,
-						 bool requiresMasterEvaluation)
-{
-	List *taskList = NIL;
-	ListCell *relationShardCell = NULL;
-	int taskId = 1;
-
-	foreach(relationShardCell, relationShardList)
-	{
-		RelationShard *relationShard = (RelationShard *) lfirst(relationShardCell);
-		List *relationShardList = list_make1(relationShard);
-		Task *task = CreateTask(MODIFY_TASK);
-
-		if (!requiresMasterEvaluation)
-		{
-			Query *copiedQuery = copyObject(originalQuery);
-			StringInfo shardQueryString = makeStringInfo();
-
-			UpdateRelationToShardNames((Node *) copiedQuery, relationShardList);
-			pg_get_query_def(copiedQuery, shardQueryString);
-
-			task->queryString = shardQueryString->data;
-		}
-
-		task->taskId = taskId++;
-		task->anchorShardId = relationShard->shardId;
-		task->relationShardList = relationShardList;
-
-		taskList = lappend(taskList, task);
-	}
-
-	return taskList;
-}
+ *//*
+ * static List *
+ * MultiShardModifyTaskList(Query *originalQuery, List *relationShardList,
+ *                       bool requiresMasterEvaluation)
+ * {
+ *  List *taskList = NIL;
+ *  ListCell *relationShardCell = NULL;
+ *  int taskId = 1;
+ *
+ *  foreach(relationShardCell, relationShardList)
+ *  {
+ *      RelationShard *relationShard = (RelationShard *) lfirst(relationShardCell);
+ *      List *relationShardList = list_make1(relationShard);
+ *      Task *task = CreateTask(MODIFY_TASK);
+ *
+ *      if (!requiresMasterEvaluation)
+ *      {
+ *          Query *copiedQuery = copyObject(originalQuery);
+ *          StringInfo shardQueryString = makeStringInfo();
+ *
+ *          UpdateRelationToShardNames((Node *) copiedQuery, relationShardList);
+ *          pg_get_query_def(copiedQuery, shardQueryString);
+ *
+ *          task->queryString = shardQueryString->data;
+ *      }
+ *
+ *      task->taskId = taskId++;
+ *      task->anchorShardId = relationShard->shardId;
+ *      task->relationShardList = relationShardList;
+ *
+ *      taskList = lappend(taskList, task);
+ *  }
+ *
+ *  return taskList;
+ * }*/
 
 
 /*
@@ -1731,6 +1720,7 @@ PlanRouterQuery(Query *originalQuery,
 	bool isMultipleTableModifyQuery = false;
 
 	*placementList = NIL;
+
 	prunedRelationShardList = TargetShardIntervalsForQuery(originalQuery,
 														   plannerRestrictionContext->
 														   relationRestrictionContext,
@@ -1752,10 +1742,12 @@ PlanRouterQuery(Query *originalQuery,
 
 		Assert(UpdateOrDeleteQuery(originalQuery));
 
-		isMultipleTableModifyQuery = (list_length(
-										  plannerRestrictionContext->
-										  relationRestrictionContext->
-										  relationRestrictionList) > 1);
+		if (list_length(
+				plannerRestrictionContext->relationRestrictionContext->
+				relationRestrictionList) > 1)
+		{
+			isMultipleTableModifyQuery = true;
+		}
 
 		planningError = ModifyQuerySupported(originalQuery, originalQuery,
 											 isMultipleTableModifyQuery,
@@ -1769,11 +1761,11 @@ PlanRouterQuery(Query *originalQuery,
 	}
 
 	/*
-	 * If the modify query uses multiple tables, relation shard list should be
-	 * returned as list of shard list for each table. Check the implementation
-	 * of QueryPushdownSqlTaskList.
+	 * If the modify query uses multiple shards and update/delete query, relation
+	 * shard list should be returned as list of shard list for each table. Check
+	 * the implementation of QueryPushdownSqlTaskList.
 	 */
-	if (isMultipleTableModifyQuery)
+	if (UpdateOrDeleteQuery(originalQuery) && isMultiShardModifyQuery)
 	{
 		*relationShardList = prunedRelationShardList;
 		*multiShardModifyQuery = true;
