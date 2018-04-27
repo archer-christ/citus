@@ -692,19 +692,22 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 	/*
 	 * We have to allow modify queries with two range table entries, if it is pushdownable.
 	 */
-	if (commandType != CMD_INSERT && queryTableCount != 1)
+	if (commandType != CMD_INSERT)
 	{
 		/* We can not get restriction context via master_modify_multiple_shards path */
 		if (plannerRestrictionContext == NULL)
 		{
-			return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-								 "cannot run multi shard modify query with master_modify_multiple_shard when the query involves subquery or join",
-								 "Execute the query without using master_modify_multiple_shard()",
-								 NULL);
+			if (queryTableCount != 1)
+			{
+				return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+									 "cannot run multi shard modify query with master_modify_multiple_shards when the query involves subquery or join",
+									 "Execute the query without using master_modify_multiple_shards()",
+									 NULL);
+			}
 		}
 
 		/* If it is a multi-shard modify query with multiple tables */
-		if (multiShardQuery)
+		else if (multiShardQuery)
 		{
 			DeferredErrorMessage *errorMessage = NULL;
 			RangeTblEntry *resultRangeTable = rt_fetch(originalQuery->resultRelation,
@@ -1716,8 +1719,6 @@ PlanRouterQuery(Query *originalQuery,
 	bool shardsPresent = false;
 	uint64 shardId = INVALID_SHARD_ID;
 	CmdType commandType = originalQuery->commandType;
-	bool isMultiShardModifyQuery = false;
-	bool isMultipleTableModifyQuery = false;
 
 	*placementList = NIL;
 
@@ -1742,34 +1743,24 @@ PlanRouterQuery(Query *originalQuery,
 
 		Assert(UpdateOrDeleteQuery(originalQuery));
 
-		if (list_length(
-				plannerRestrictionContext->relationRestrictionContext->
-				relationRestrictionList) > 1)
-		{
-			isMultipleTableModifyQuery = true;
-		}
-
 		planningError = ModifyQuerySupported(originalQuery, originalQuery,
-											 isMultipleTableModifyQuery,
+											 isMultiShardQuery,
 											 plannerRestrictionContext);
 		if (planningError != NULL)
 		{
 			return planningError;
 		}
-
-		isMultiShardModifyQuery = true;
-	}
-
-	/*
-	 * If the modify query uses multiple shards and update/delete query, relation
-	 * shard list should be returned as list of shard list for each table. Check
-	 * the implementation of QueryPushdownSqlTaskList.
-	 */
-	if (UpdateOrDeleteQuery(originalQuery) && isMultiShardModifyQuery)
-	{
-		*relationShardList = prunedRelationShardList;
-		*multiShardModifyQuery = true;
-		return planningError;
+		else
+		{
+			/*
+			 * If the modify query uses multiple shards and update/delete query, relation
+			 * shard list should be returned as list of shard list for each table. Check
+			 * the implementation of QueryPushdownSqlTaskList.
+			 */
+			*relationShardList = prunedRelationShardList;
+			*multiShardModifyQuery = true;
+			return planningError;
+		}
 	}
 
 	foreach(prunedRelationShardListCell, prunedRelationShardList)
@@ -1795,12 +1786,6 @@ PlanRouterQuery(Query *originalQuery,
 
 			*relationShardList = lappend(*relationShardList, relationShard);
 		}
-	}
-
-	if (isMultiShardModifyQuery)
-	{
-		*multiShardModifyQuery = true;
-		return planningError;
 	}
 
 	/*
