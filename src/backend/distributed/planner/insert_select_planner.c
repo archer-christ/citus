@@ -417,12 +417,8 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 	Oid distributedTableId = shardInterval->relationId;
 	DistTableCacheEntry *cacheEntry = DistributedTableCacheEntry(distributedTableId);
 
-	RelationRestrictionContext *copiedRestrictionContext =
-		CopyRelationRestrictionContext(
-			plannerRestrictionContext->relationRestrictionContext);
-	RelationRestrictionContext *originalRestrictionContext =
-		CopyRelationRestrictionContext(
-			plannerRestrictionContext->relationRestrictionContext);
+	PlannerRestrictionContext *copyOfPlannerRestrictionContext = palloc0(
+		sizeof(PlannerRestrictionContext));
 
 	StringInfo queryString = makeStringInfo();
 	ListCell *restrictionCell = NULL;
@@ -435,11 +431,18 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 	List *intersectedPlacementList = NULL;
 	bool upsertQuery = false;
 	bool replacePrunedQueryWithDummy = false;
-	bool allReferenceTables = originalRestrictionContext->allReferenceTables;
+	bool allReferenceTables =
+		plannerRestrictionContext->relationRestrictionContext->allReferenceTables;
 	List *shardOpExpressions = NIL;
 	RestrictInfo *shardRestrictionList = NULL;
 	DeferredErrorMessage *planningError = NULL;
 	bool multiShardModifyQuery = false;
+
+	copyOfPlannerRestrictionContext->relationRestrictionContext =
+		CopyRelationRestrictionContext(
+			plannerRestrictionContext->relationRestrictionContext);
+	copyOfPlannerRestrictionContext->joinRestrictionContext =
+		plannerRestrictionContext->joinRestrictionContext;
 
 	/* grab shared metadata lock to stop concurrent placement additions */
 	LockShardDistributionMetadata(shardId, ShareLock);
@@ -448,7 +451,9 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 	 * Replace the partitioning qual parameter value in all baserestrictinfos.
 	 * Note that this has to be done on a copy, as the walker modifies in place.
 	 */
-	foreach(restrictionCell, copiedRestrictionContext->relationRestrictionList)
+	foreach(restrictionCell,
+			copyOfPlannerRestrictionContext->relationRestrictionContext->
+			relationRestrictionList)
 	{
 		RelationRestriction *restriction = lfirst(restrictionCell);
 		List *originalBaseRestrictInfo = restriction->relOptInfo->baserestrictinfo;
@@ -497,12 +502,10 @@ RouterModifyTaskForShardInterval(Query *originalQuery, ShardInterval *shardInter
 	 * If we can, we also rely on the side-effects that all RTEs have been updated
 	 * to point to the relevant nodes and selectPlacementList is determined.
 	 */
-	plannerRestrictionContext->relationRestrictionContext = copiedRestrictionContext;
-	planningError = PlanRouterQuery(copiedSubquery, plannerRestrictionContext,
+	planningError = PlanRouterQuery(copiedSubquery, copyOfPlannerRestrictionContext,
 									&selectPlacementList, &selectAnchorShardId,
 									&relationShardList, replacePrunedQueryWithDummy,
 									&multiShardModifyQuery);
-	plannerRestrictionContext->relationRestrictionContext = originalRestrictionContext;
 
 	Assert(!multiShardModifyQuery);
 

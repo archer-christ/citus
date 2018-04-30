@@ -179,7 +179,7 @@ typedef struct Task
 	bool upsertQuery;              /* only applies to modify tasks */
 	char replicationModel;         /* only applies to modify tasks */
 
-	bool modifyWithSubquery;	   /* true for multi-shard INSERT/UPDATE/DELETE queries */
+	bool modifyWithSubquery;       /* true for multi-shard INSERT/UPDATE/DELETE queries */
 	List *relationShardList;
 
 	List *rowValuesLists;          /* rows to use when building multi-row INSERT */
@@ -327,6 +327,8 @@ extern bool TaskListMember(const List *taskList, const Task *task);
 extern List * TaskListDifference(const List *list1, const List *list2);
 extern List * AssignAnchorShardTaskList(List *taskList);
 extern List * FirstReplicaAssignTaskList(List *taskList);
+
+/* function declaration for creating Task */
 extern List * QueryPushdownSqlTaskList(Query *query, uint64 jobId,
 									   RelationRestrictionContext *
 									   relationRestrictionContext,

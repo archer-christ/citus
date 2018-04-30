@@ -352,6 +352,28 @@ WHERE
     ) e2 ON true
 );
 
+UPDATE users_test_table
+SET value_3 = 5
+WHERE value_2 IN (SELECT AVG(value_1) OVER (PARTITION BY user_id) FROM events_test_table WHERE events_test_table.user_id = users_test_table.user_id);
+
+-- Test it within transaction
+BEGIN;
+
+INSERT INTO users_test_table
+SELECT * FROM events_test_table
+WHERE events_test_table.user_id = 1 OR events_test_table.user_id = 5;
+
+SELECT SUM(value_2) FROM users_test_table;
+
+UPDATE users_test_table
+SET value_2 = 1
+FROM events_test_table
+WHERE users_test_table.user_id = events_test_table.user_id;
+
+SELECT SUM(value_2) FROM users_test_table;
+
+COMMIT;
+
 -- We don't need partition key equality with reference tables
 UPDATE events_test_table
 SET    value_2 = 5
@@ -397,6 +419,13 @@ UPDATE users_reference_copy_table
 SET    value_2 = 5
 FROM   events_test_table
 WHERE  users_reference_copy_table.user_id = events_test_table.user_id;
+
+-- We cannot push down it if the query has outer join and using
+UPDATE events_test_table
+SET value_2 = users_test_table.user_id
+FROM users_test_table
+FULL OUTER JOIN events_test_table e2 USING (user_id)
+WHERE e2.user_id = events_test_table.user_id RETURNING events_test_table.value_2;
 
 -- We can not pushdown query if there is no partition key equality
 UPDATE users_test_table

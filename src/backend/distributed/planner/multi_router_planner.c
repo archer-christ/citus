@@ -112,7 +112,10 @@ static DistributedPlan * CreateSingleTaskRouterPlan(Query *originalQuery,
 													PlannerRestrictionContext *
 													plannerRestrictionContext);
 static bool IsTidColumn(Node *node);
-static DeferredErrorMessage * MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionContext);
+static DeferredErrorMessage * MultiShardModifyQuerySupported(Query *originalQuery,
+															 PlannerRestrictionContext *
+															 plannerRestrictionContext);
+static bool HasDangerousJoinUsing(List *rtableList, Node *jtnode);
 static bool MasterIrreducibleExpression(Node *expression, bool *varArgument,
 										bool *badCoalesce);
 static bool MasterIrreducibleExpressionWalker(Node *expression, WalkerState *state);
@@ -701,11 +704,11 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 								 "Execute the query without using master_modify_multiple_shards()",
 								 NULL);
 		}
-
 		/* If it is a multi-shard modify query with multiple tables */
 		else if (multiShardQuery)
 		{
-			DeferredErrorMessage *errorMessage = MultiShardModifyQuerySupported(originalQuery, plannerRestrictionContext);
+			DeferredErrorMessage *errorMessage = MultiShardModifyQuerySupported(
+				originalQuery, plannerRestrictionContext);
 
 			if (errorMessage != NULL)
 			{
@@ -904,12 +907,14 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 	return NULL;
 }
 
+
 /*
  * MultiShardModifyQuerySupported returns the error message if the modify query is
  * not pushdownable, otherwise it returns NULL.
  */
 static DeferredErrorMessage *
-MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionContext)
+MultiShardModifyQuerySupported(Query *originalQuery,
+							   PlannerRestrictionContext *plannerRestrictionContext)
 {
 	DeferredErrorMessage *errorMessage = NULL;
 	RangeTblEntry *resultRangeTable = rt_fetch(originalQuery->resultRelation,
@@ -917,6 +922,13 @@ MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *
 	Oid resultRelationOid = resultRangeTable->relid;
 	char resultPartitionMethod = PartitionMethod(resultRelationOid);
 
+	if (HasDangerousJoinUsing(originalQuery->rtable, (Node *) originalQuery->jointree))
+	{
+		ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						errmsg(
+							"a join with USING causes an internal naming conflict, use "
+							"ON instead")));
+	}
 	if (resultPartitionMethod == DISTRIBUTE_BY_NONE)
 	{
 		errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
@@ -925,13 +937,6 @@ MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *
 									 "with multiple tables ",
 									 NULL, NULL);
 	}
-	else if(!AllDistributionKeysInQueryAreEqual(originalQuery, plannerRestrictionContext))
-	{
-		errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-							 "complex joins are only supported when all distributed tables are "
-							 "joined on their distribution columns with equal operator",
-							 NULL, NULL);
-	}
 	else
 	{
 		errorMessage = DeferErrorIfUnsupportedSubqueryPushdown(originalQuery,
@@ -939,6 +944,75 @@ MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *
 	}
 
 	return errorMessage;
+}
+
+
+/*
+ * HasDangerousJoinUsing search jointree for unnamed JOIN USING. Check the
+ * implementation of has_dangerous_join_using in ruleutils.
+ */
+static bool
+HasDangerousJoinUsing(List *rtableList, Node *jtnode)
+{
+	if (IsA(jtnode, RangeTblRef))
+	{
+		/* nothing to do here */
+	}
+	else if (IsA(jtnode, FromExpr))
+	{
+		FromExpr *f = (FromExpr *) jtnode;
+		ListCell *lc;
+
+		foreach(lc, f->fromlist)
+		{
+			if (HasDangerousJoinUsing(rtableList, (Node *) lfirst(lc)))
+			{
+				return true;
+			}
+		}
+	}
+	else if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr *j = (JoinExpr *) jtnode;
+
+		/* Is it an unnamed JOIN with USING? */
+		if (j->alias == NULL && j->usingClause)
+		{
+			/*
+			 * Yes, so check each join alias var to see if any of them are not
+			 * simple references to underlying columns.  If so, we have a
+			 * dangerous situation and must pick unique aliases.
+			 */
+			RangeTblEntry *jrte = rt_fetch(j->rtindex, rtableList);
+			ListCell *lc;
+
+			foreach(lc, jrte->joinaliasvars)
+			{
+				Var *aliasvar = (Var *) lfirst(lc);
+
+				if (aliasvar != NULL && !IsA(aliasvar, Var))
+				{
+					return true;
+				}
+			}
+		}
+
+		/* Nope, but inspect children */
+		if (HasDangerousJoinUsing(rtableList, j->larg))
+		{
+			return true;
+		}
+		if (HasDangerousJoinUsing(rtableList, j->rarg))
+		{
+			return true;
+		}
+	}
+	else
+	{
+		elog(ERROR, "unrecognized node type: %d",
+			 (int) nodeTag(jtnode));
+	}
+	return false;
 }
 
 
@@ -1495,19 +1569,6 @@ RouterJob(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionCon
 												 relationRestrictionContext,
 												 relationShardList, MODIFY_TASK,
 												 requiresMasterEvaluation);
-
-		/* If it is a modify task with multiple tables */
-		if (list_length(
-				plannerRestrictionContext->relationRestrictionContext->
-				relationRestrictionList) > 1)
-		{
-			ListCell *taskCell = NULL;
-			foreach(taskCell, job->taskList)
-			{
-				Task *task = (Task *) lfirst(taskCell);
-				task->modifyWithSubquery = true;
-			}
-		}
 	}
 	else
 	{

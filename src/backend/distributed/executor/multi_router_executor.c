@@ -452,7 +452,7 @@ CitusModifyBeginScan(CustomScanState *node, EState *estate, int eflags)
 	LockPartitionsInRelationList(distributedPlan->relationIdList, AccessShareLock);
 
 	/* modify tasks are always assigned using first-replica policy */
-	taskList = FirstReplicaAssignTaskList(taskList);
+	workerJob->taskList = FirstReplicaAssignTaskList(taskList);
 }
 
 

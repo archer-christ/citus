@@ -198,6 +198,7 @@ static uint32 FinalTargetEntryCount(List *targetEntryList);
 static bool CoPlacedShardIntervals(ShardInterval *firstInterval,
 								   ShardInterval *secondInterval);
 
+
 /*
  * CreatePhysicalDistributedPlan is the entry point for physical plan generation. The
  * function builds the physical plan; this plan includes the list of tasks to be
@@ -2173,6 +2174,18 @@ QueryPushdownSqlTaskList(Query *query, uint64 jobId,
 		++taskIdIndex;
 	}
 
+	/* If it is a modify task with multiple tables */
+	if (taskType == MODIFY_TASK && list_length(
+			relationRestrictionContext->relationRestrictionList) > 1)
+	{
+		ListCell *taskCell = NULL;
+		foreach(taskCell, sqlTaskList)
+		{
+			Task *task = (Task *) lfirst(taskCell);
+			task->modifyWithSubquery = true;
+		}
+	}
+
 	return sqlTaskList;
 }
 
@@ -2305,20 +2318,19 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 	List *selectPlacementList = NIL;
 	uint64 jobId = INVALID_JOB_ID;
 	uint64 anchorShardId = INVALID_SHARD_ID;
-	bool isModifyWithSubselect = false;
+	bool modifyWithSubselect = false;
 	RangeTblEntry *resultRangeTable = NULL;
 	Oid resultRelationOid = InvalidOid;
 
 	/*
-	 * If it is a modify query with sub-select, we need to have result relation
-	 * to obtain right lock on it.
+	 * If it is a modify query with sub-select, we need to set result relation shard's id
+	 * as anchor shard id.
 	 */
-	if (UpdateOrDeleteQuery(originalQuery) && list_length(
-			restrictionContext->relationRestrictionList) > 1)
+	if (UpdateOrDeleteQuery(originalQuery))
 	{
 		resultRangeTable = rt_fetch(originalQuery->resultRelation, originalQuery->rtable);
 		resultRelationOid = resultRangeTable->relid;
-		isModifyWithSubselect = true;
+		modifyWithSubselect = true;
 	}
 
 	/*
@@ -2345,26 +2357,20 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 				anchorShardId = shardInterval->shardId;
 			}
 		}
-		else
+		else if (UpdateOrDeleteQuery(originalQuery))
 		{
-			/* use the shard from a specific index */
 			shardInterval = cacheEntry->sortedShardIntervalArray[shardIndex];
-
-			/*
-			 * We want to use result relation's shard id as anchor shard id
-			 */
-			if (isModifyWithSubselect)
+			if (!modifyWithSubselect || relationId == resultRelationOid)
 			{
-				if (relationId == resultRelationOid)
-				{
-					anchorShardId = shardInterval->shardId;
-				}
-			}
-			else
-			{
-				/* use a shard from a distributed table as the anchor shard */
+				/* for UPDATE/DELETE the shard in the result relation becomes the anchor shard */
 				anchorShardId = shardInterval->shardId;
 			}
+		}
+		else
+		{
+			/* for SELECT we pick an arbitrary shard as the anchor shard */
+			shardInterval = cacheEntry->sortedShardIntervalArray[shardIndex];
+			anchorShardId = shardInterval->shardId;
 		}
 
 		taskShardList = lappend(taskShardList, list_make1(shardInterval));
@@ -2404,9 +2410,9 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 
 	subqueryTask = CreateBasicTask(jobId, taskId, taskType, NULL);
 
-	if (!modifyRequiresMasterEvaluation)
+	if ((taskType == MODIFY_TASK && !modifyRequiresMasterEvaluation) ||
+		taskType == SQL_TASK)
 	{
-		/* and generate the full query string */
 		pg_get_query_def(taskQuery, queryString);
 		ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
 		subqueryTask->queryString = queryString->data;
