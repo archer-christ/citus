@@ -382,6 +382,7 @@ UPDATE users_test_table
 SET    value_2 = 6
 WHERE  value_1 IN (SELECT 2);
 
+-- Can only use immutable functions
 UPDATE test_table_1
 SET    col_3 = 6
 WHERE  date_col IN (SELECT now());

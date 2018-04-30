@@ -179,7 +179,7 @@ typedef struct Task
 	bool upsertQuery;              /* only applies to modify tasks */
 	char replicationModel;         /* only applies to modify tasks */
 
-	bool modifyWithSubquery;
+	bool modifyWithSubquery;	   /* true for multi-shard INSERT/UPDATE/DELETE queries */
 	List *relationShardList;
 
 	List *rowValuesLists;          /* rows to use when building multi-row INSERT */

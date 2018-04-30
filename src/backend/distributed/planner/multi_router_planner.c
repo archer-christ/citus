@@ -112,6 +112,7 @@ static DistributedPlan * CreateSingleTaskRouterPlan(Query *originalQuery,
 													PlannerRestrictionContext *
 													plannerRestrictionContext);
 static bool IsTidColumn(Node *node);
+static DeferredErrorMessage * MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionContext);
 static bool MasterIrreducibleExpression(Node *expression, bool *varArgument,
 										bool *badCoalesce);
 static bool MasterIrreducibleExpressionWalker(Node *expression, WalkerState *state);
@@ -149,8 +150,6 @@ static List * SingleShardSelectTaskList(Query *query, List *relationShardList,
 static List * SingleShardModifyTaskList(Query *query, List *relationShardList,
 										List *placementList, uint64 shardId);
 
-/*static List * MultiShardModifyTaskList(Query *originalQuery, List *relationShardList, */
-/*									   bool requiresMasterEvaluation); */
 
 /*
  * CreateRouterPlan attempts to create a router executor plan for the given
@@ -695,41 +694,18 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 	if (commandType != CMD_INSERT)
 	{
 		/* We can not get restriction context via master_modify_multiple_shards path */
-		if (plannerRestrictionContext == NULL)
+		if (plannerRestrictionContext == NULL && queryTableCount != 1)
 		{
-			if (queryTableCount != 1)
-			{
-				return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-									 "cannot run multi shard modify query with master_modify_multiple_shards when the query involves subquery or join",
-									 "Execute the query without using master_modify_multiple_shards()",
-									 NULL);
-			}
+			return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+								 "cannot run multi shard modify query with master_modify_multiple_shards when the query involves subquery or join",
+								 "Execute the query without using master_modify_multiple_shards()",
+								 NULL);
 		}
 
 		/* If it is a multi-shard modify query with multiple tables */
 		else if (multiShardQuery)
 		{
-			DeferredErrorMessage *errorMessage = NULL;
-			RangeTblEntry *resultRangeTable = rt_fetch(originalQuery->resultRelation,
-													   originalQuery->rtable);
-			Oid resultRelationOid = resultRangeTable->relid;
-			char resultPartitionMethod = PartitionMethod(resultRelationOid);
-			bool allReferenceTable =
-				plannerRestrictionContext->relationRestrictionContext->allReferenceTables;
-
-			if (resultPartitionMethod == DISTRIBUTE_BY_NONE && !allReferenceTable)
-			{
-				errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
-											 "only reference tables may be queried when targeting "
-											 "a reference table with multi shard UPDATE/DELETE queries "
-											 "with multiple tables ",
-											 NULL, NULL);
-			}
-			else
-			{
-				errorMessage = DeferErrorIfUnsupportedSubqueryPushdown(originalQuery,
-																	   plannerRestrictionContext);
-			}
+			DeferredErrorMessage *errorMessage = MultiShardModifyQuerySupported(originalQuery, plannerRestrictionContext);
 
 			if (errorMessage != NULL)
 			{
@@ -926,6 +902,43 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 	}
 
 	return NULL;
+}
+
+/*
+ * MultiShardModifyQuerySupported returns the error message if the modify query is
+ * not pushdownable, otherwise it returns NULL.
+ */
+static DeferredErrorMessage *
+MultiShardModifyQuerySupported(Query *originalQuery, PlannerRestrictionContext *plannerRestrictionContext)
+{
+	DeferredErrorMessage *errorMessage = NULL;
+	RangeTblEntry *resultRangeTable = rt_fetch(originalQuery->resultRelation,
+											   originalQuery->rtable);
+	Oid resultRelationOid = resultRangeTable->relid;
+	char resultPartitionMethod = PartitionMethod(resultRelationOid);
+
+	if (resultPartitionMethod == DISTRIBUTE_BY_NONE)
+	{
+		errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+									 "only reference tables may be queried when targeting "
+									 "a reference table with multi shard UPDATE/DELETE queries "
+									 "with multiple tables ",
+									 NULL, NULL);
+	}
+	else if(!AllDistributionKeysInQueryAreEqual(originalQuery, plannerRestrictionContext))
+	{
+		errorMessage = DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+							 "complex joins are only supported when all distributed tables are "
+							 "joined on their distribution columns with equal operator",
+							 NULL, NULL);
+	}
+	else
+	{
+		errorMessage = DeferErrorIfUnsupportedSubqueryPushdown(originalQuery,
+															   plannerRestrictionContext);
+	}
+
+	return errorMessage;
 }
 
 
@@ -1527,46 +1540,6 @@ SingleShardSelectTaskList(Query *query, List *relationShardList, List *placement
 
 	return list_make1(task);
 }
-
-
-/*
- * MultiShardModifyTaskList generates task list for multi shard update/delete
- * queries.
- *//*
- * static List *
- * MultiShardModifyTaskList(Query *originalQuery, List *relationShardList,
- *                       bool requiresMasterEvaluation)
- * {
- *  List *taskList = NIL;
- *  ListCell *relationShardCell = NULL;
- *  int taskId = 1;
- *
- *  foreach(relationShardCell, relationShardList)
- *  {
- *      RelationShard *relationShard = (RelationShard *) lfirst(relationShardCell);
- *      List *relationShardList = list_make1(relationShard);
- *      Task *task = CreateTask(MODIFY_TASK);
- *
- *      if (!requiresMasterEvaluation)
- *      {
- *          Query *copiedQuery = copyObject(originalQuery);
- *          StringInfo shardQueryString = makeStringInfo();
- *
- *          UpdateRelationToShardNames((Node *) copiedQuery, relationShardList);
- *          pg_get_query_def(copiedQuery, shardQueryString);
- *
- *          task->queryString = shardQueryString->data;
- *      }
- *
- *      task->taskId = taskId++;
- *      task->anchorShardId = relationShard->shardId;
- *      task->relationShardList = relationShardList;
- *
- *      taskList = lappend(taskList, task);
- *  }
- *
- *  return taskList;
- * }*/
 
 
 /*
