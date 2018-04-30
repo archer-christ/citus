@@ -221,13 +221,15 @@ SELECT * FROM modify_table ORDER BY id, val;
 SELECT * FROM anchor_table ORDER BY id;
 
 INSERT INTO modify_table VALUES (11, 1), (12, 2), (13, 3);
-WITH select_data AS (
+
+-- This test will be enabled after recursive planner is enabled for modify query.
+/*WITH select_data AS (
 	SELECT * FROM modify_table
 ),
 raw_data AS (
 	DELETE FROM modify_table WHERE id >= (SELECT min(id) FROM select_data WHERE id > 10) RETURNING *
 )
-INSERT INTO summary_table SELECT id, COUNT(*) AS counter FROM raw_data GROUP BY id;
+INSERT INTO summary_table SELECT id, COUNT(*) AS counter FROM raw_data GROUP BY id;*/
 
 INSERT INTO modify_table VALUES (21, 1), (22, 2), (23, 3);
 

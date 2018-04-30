@@ -445,6 +445,31 @@ WHERE
         user_id = e1.user_id
     ) e2 ON true
 );
+UPDATE users_test_table
+SET value_3 = 5
+WHERE value_2 IN (SELECT AVG(value_1) OVER (PARTITION BY user_id) FROM events_test_table WHERE events_test_table.user_id = users_test_table.user_id);
+-- Test it within transaction
+BEGIN;
+INSERT INTO users_test_table
+SELECT * FROM events_test_table
+WHERE events_test_table.user_id = 1 OR events_test_table.user_id = 5;
+SELECT SUM(value_2) FROM users_test_table;
+ sum 
+-----
+ 169
+(1 row)
+
+UPDATE users_test_table
+SET value_2 = 1
+FROM events_test_table
+WHERE users_test_table.user_id = events_test_table.user_id;
+SELECT SUM(value_2) FROM users_test_table;
+ sum 
+-----
+  97
+(1 row)
+
+COMMIT;
 -- We don't need partition key equality with reference tables
 UPDATE events_test_table
 SET    value_2 = 5
@@ -479,12 +504,21 @@ DETAIL:  Subqueries without a FROM clause can only contain immutable functions
 UPDATE users_test_table as utt
 SET    value_1 = 3
 WHERE value_2 > (SELECT value_3 FROM events_test_table as ett WHERE utt.user_id = ett.user_id);
+ERROR:  more than one row returned by a subquery used as an expression
+CONTEXT:  while executing command on localhost:57637
 -- We can not pushdown a query if the target relation is reference table
 UPDATE users_reference_copy_table
 SET    value_2 = 5
 FROM   events_test_table
 WHERE  users_reference_copy_table.user_id = events_test_table.user_id;
 ERROR:  only reference tables may be queried when targeting a reference table with multi shard UPDATE/DELETE queries with multiple tables 
+-- We cannot push down it if the query has outer join and using
+UPDATE events_test_table
+SET value_2 = users_test_table.user_id
+FROM users_test_table
+FULL OUTER JOIN events_test_table e2 USING (user_id)
+WHERE e2.user_id = events_test_table.user_id RETURNING events_test_table.value_2;
+ERROR:  a join with USING causes an internal naming conflict, use ON instead
 -- We can not pushdown query if there is no partition key equality
 UPDATE users_test_table
 SET    value_1 = 1

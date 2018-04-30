@@ -132,6 +132,7 @@ static Task * QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 									  uint32 taskId,
 									  TaskType taskType,
 									  bool modifyRequiresMasterEvaluation);
+static bool HasDangerousJoinUsing(List *rtableList, Node *jtnode);
 static bool ShardIntervalsEqual(FmgrInfo *comparisonFunction,
 								ShardInterval *firstInterval,
 								ShardInterval *secondInterval);
@@ -197,6 +198,7 @@ static StringInfo IntermediateTableQueryString(uint64 jobId, uint32 taskIdIndex,
 static uint32 FinalTargetEntryCount(List *targetEntryList);
 static bool CoPlacedShardIntervals(ShardInterval *firstInterval,
 								   ShardInterval *secondInterval);
+
 
 /*
  * CreatePhysicalDistributedPlan is the entry point for physical plan generation. The
@@ -2173,6 +2175,18 @@ QueryPushdownSqlTaskList(Query *query, uint64 jobId,
 		++taskIdIndex;
 	}
 
+	/* If it is a modify task with multiple tables */
+	if (taskType == MODIFY_TASK && list_length(
+			relationRestrictionContext->relationRestrictionList) > 1)
+	{
+		ListCell *taskCell = NULL;
+		foreach(taskCell, sqlTaskList)
+		{
+			Task *task = (Task *) lfirst(taskCell);
+			task->modifyWithSubquery = true;
+		}
+	}
+
 	return sqlTaskList;
 }
 
@@ -2305,7 +2319,7 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 	List *selectPlacementList = NIL;
 	uint64 jobId = INVALID_JOB_ID;
 	uint64 anchorShardId = INVALID_SHARD_ID;
-	bool isModifyWithSubselect = false;
+	bool modifyWithSubselect = false;
 	RangeTblEntry *resultRangeTable = NULL;
 	Oid resultRelationOid = InvalidOid;
 
@@ -2318,7 +2332,7 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 	{
 		resultRangeTable = rt_fetch(originalQuery->resultRelation, originalQuery->rtable);
 		resultRelationOid = resultRangeTable->relid;
-		isModifyWithSubselect = true;
+		modifyWithSubselect = true;
 	}
 
 	/*
@@ -2353,7 +2367,7 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 			/*
 			 * We want to use result relation's shard id as anchor shard id
 			 */
-			if (isModifyWithSubselect)
+			if (modifyWithSubselect)
 			{
 				if (relationId == resultRelationOid)
 				{
@@ -2404,9 +2418,25 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 
 	subqueryTask = CreateBasicTask(jobId, taskId, taskType, NULL);
 
-	if (!modifyRequiresMasterEvaluation)
+	if (UpdateOrDeleteQuery(taskQuery))
 	{
-		/* and generate the full query string */
+		if (HasDangerousJoinUsing(taskQuery->rtable, (Node *) taskQuery->jointree))
+		{
+			ereport(ERROR, (errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							errmsg(
+								"a join with USING causes an internal naming conflict, use ON instead")));
+		}
+		else if (!modifyRequiresMasterEvaluation)
+		{
+			/* and generate the full query string */
+			pg_get_query_def(taskQuery, queryString);
+			ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
+			subqueryTask->queryString = queryString->data;
+		}
+	}
+	else
+	{
+		/* that means it is a select query */
 		pg_get_query_def(taskQuery, queryString);
 		ereport(DEBUG4, (errmsg("distributed statement: %s", queryString->data)));
 		subqueryTask->queryString = queryString->data;
@@ -2419,6 +2449,75 @@ QueryPushdownTaskCreate(Query *originalQuery, int shardIndex,
 	subqueryTask->relationShardList = relationShardList;
 
 	return subqueryTask;
+}
+
+
+/*
+ * HasDangerousJoinUsing search jointree for unnamed JOIN USING. Check the
+ * implementation of has_dangerous_join_using in ruleutils.
+ */
+static bool
+HasDangerousJoinUsing(List *rtableList, Node *jtnode)
+{
+	if (IsA(jtnode, RangeTblRef))
+	{
+		/* nothing to do here */
+	}
+	else if (IsA(jtnode, FromExpr))
+	{
+		FromExpr *f = (FromExpr *) jtnode;
+		ListCell *lc;
+
+		foreach(lc, f->fromlist)
+		{
+			if (HasDangerousJoinUsing(rtableList, (Node *) lfirst(lc)))
+			{
+				return true;
+			}
+		}
+	}
+	else if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr *j = (JoinExpr *) jtnode;
+
+		/* Is it an unnamed JOIN with USING? */
+		if (j->alias == NULL && j->usingClause)
+		{
+			/*
+			 * Yes, so check each join alias var to see if any of them are not
+			 * simple references to underlying columns.  If so, we have a
+			 * dangerous situation and must pick unique aliases.
+			 */
+			RangeTblEntry *jrte = rt_fetch(j->rtindex, rtableList);
+			ListCell *lc;
+
+			foreach(lc, jrte->joinaliasvars)
+			{
+				Var *aliasvar = (Var *) lfirst(lc);
+
+				if (aliasvar != NULL && !IsA(aliasvar, Var))
+				{
+					return true;
+				}
+			}
+		}
+
+		/* Nope, but inspect children */
+		if (HasDangerousJoinUsing(rtableList, j->larg))
+		{
+			return true;
+		}
+		if (HasDangerousJoinUsing(rtableList, j->rarg))
+		{
+			return true;
+		}
+	}
+	else
+	{
+		elog(ERROR, "unrecognized node type: %d",
+			 (int) nodeTag(jtnode));
+	}
+	return false;
 }
 
 
