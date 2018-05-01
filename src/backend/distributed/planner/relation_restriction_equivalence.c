@@ -63,7 +63,6 @@ typedef struct AttributeEquivalenceClassMember
 } AttributeEquivalenceClassMember;
 
 
-static bool ContextContainsLocalRelation(RelationRestrictionContext *restrictionContext);
 static Var * FindTranslatedVar(List *appendRelList, Oid relationOid,
 							   Index relationRteIndex, Index *partitionKeyIndex);
 static bool ContainsMultipleDistributedRelations(PlannerRestrictionContext *
@@ -190,7 +189,7 @@ AllDistributionKeysInQueryAreEqual(Query *originalQuery,
  * ContextContainsLocalRelation determines whether the given
  * RelationRestrictionContext contains any local tables.
  */
-static bool
+bool
 ContextContainsLocalRelation(RelationRestrictionContext *restrictionContext)
 {
 	ListCell *relationRestrictionCell = NULL;

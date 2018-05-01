@@ -522,9 +522,9 @@ DeferredErrorMessage *
 ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuery,
 					 PlannerRestrictionContext *plannerRestrictionContext)
 {
-	Oid distributedTableId = ExtractFirstDistributedTableId(queryTree);
+	Oid distributedTableId = InvalidOid;
 	uint32 rangeTableId = 1;
-	Var *partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
+	Var *partitionColumn = NULL;
 	bool isCoordinator = IsCoordinator();
 	List *rangeTableList = NIL;
 	ListCell *rangeTableCell = NULL;
@@ -535,6 +535,18 @@ ModifyQuerySupported(Query *queryTree, Query *originalQuery, bool multiShardQuer
 	Node *arbiterWhere = NULL;
 	Node *onConflictWhere = NULL;
 	CmdType commandType = queryTree->commandType;
+
+	RelationRestrictionContext *relationRestrictionContext =
+		plannerRestrictionContext->relationRestrictionContext;
+	if (ContextContainsLocalRelation(relationRestrictionContext))
+	{
+		return DeferredError(ERRCODE_FEATURE_NOT_SUPPORTED,
+							 "cannot handle local tables in distributed modifications",
+							 NULL, NULL);
+	}
+
+	distributedTableId = ExtractFirstDistributedTableId(queryTree);
+	partitionColumn = PartitionColumn(distributedTableId, rangeTableId);
 
 	/*
 	 * Here, we check if a recursively planned query tries to modify
