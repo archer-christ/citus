@@ -50,17 +50,16 @@ static uint64 NextPlanId = 1;
 
 /* local function forward declarations */
 static bool NeedsDistributedPlanningWalker(Node *node, void *context);
-static PlannedStmt * CreateDistributedPlan(uint64 planId, PlannedStmt *localPlan,
-										   Query *originalQuery, Query *query,
-										   ParamListInfo boundParams,
-										   PlannerRestrictionContext *
-										   plannerRestrictionContext);
-static DistributedPlan * CreateDistributedSelectPlan(uint64 planId, Query *originalQuery,
-													 Query *query,
-													 ParamListInfo boundParams,
-													 bool hasUnresolvedParams,
-													 PlannerRestrictionContext *
-													 plannerRestrictionContext);
+static PlannedStmt * CreateDistributedPlannedStmt(uint64 planId, PlannedStmt *localPlan,
+												  Query *originalQuery, Query *query,
+												  ParamListInfo boundParams,
+												  PlannerRestrictionContext *
+												  plannerRestrictionContext);
+static DistributedPlan * CreateDistributedPlan(uint64 planId, Query *originalQuery,
+											   Query *query, ParamListInfo boundParams,
+											   bool hasUnresolvedParams,
+											   PlannerRestrictionContext *
+											   plannerRestrictionContext);
 static Node * ResolveExternalParams(Node *inputNode, ParamListInfo boundParams);
 
 static void AssignRTEIdentities(Query *queryTree);
@@ -146,8 +145,8 @@ distributed_planner(Query *parse, int cursorOptions, ParamListInfo boundParams)
 		{
 			uint64 planId = NextPlanId++;
 
-			result = CreateDistributedPlan(planId, result, originalQuery, parse,
-										   boundParams, plannerRestrictionContext);
+			result = CreateDistributedPlannedStmt(planId, result, originalQuery, parse,
+												  boundParams, plannerRestrictionContext);
 		}
 	}
 	PG_CATCH();
@@ -467,13 +466,13 @@ IsModifyDistributedPlan(DistributedPlan *distributedPlan)
 
 
 /*
- * CreateDistributedPlan encapsulates the logic needed to transform a particular
- * query into a distributed plan.
+ * CreateDistributedPlannedStmt encapsulates the logic needed to transform a particular
+ * query into a distributed plan that is encapsulated by a PlannedStmt.
  */
 static PlannedStmt *
-CreateDistributedPlan(uint64 planId, PlannedStmt *localPlan, Query *originalQuery,
-					  Query *query, ParamListInfo boundParams,
-					  PlannerRestrictionContext *plannerRestrictionContext)
+CreateDistributedPlannedStmt(uint64 planId, PlannedStmt *localPlan, Query *originalQuery,
+							 Query *query, ParamListInfo boundParams,
+							 PlannerRestrictionContext *plannerRestrictionContext)
 {
 	DistributedPlan *distributedPlan = NULL;
 	PlannedStmt *resultPlan = NULL;
@@ -490,9 +489,8 @@ CreateDistributedPlan(uint64 planId, PlannedStmt *localPlan, Query *originalQuer
 		RemoveDuplicateJoinRestrictions(joinRestrictionContext);
 
 	distributedPlan =
-		CreateDistributedSelectPlan(planId, originalQuery, query, boundParams,
-									hasUnresolvedParams,
-									plannerRestrictionContext);
+		CreateDistributedPlan(planId, originalQuery, query, boundParams,
+							  hasUnresolvedParams, plannerRestrictionContext);
 
 	/*
 	 * If no plan was generated, prepare a generic error to be emitted.
@@ -559,7 +557,7 @@ CreateDistributedPlan(uint64 planId, PlannedStmt *localPlan, Query *originalQuer
 
 
 /*
- * CreateDistributedSelectPlan generates a distributed plan for a SELECT query.
+ * CreateDistributedPlan generates a distributed plan for a query.
  * It goes through 3 steps:
  *
  * 1. Try router planner
@@ -568,9 +566,9 @@ CreateDistributedPlan(uint64 planId, PlannedStmt *localPlan, Query *originalQuer
  * 3. Logical planner
  */
 static DistributedPlan *
-CreateDistributedSelectPlan(uint64 planId, Query *originalQuery, Query *query,
-							ParamListInfo boundParams, bool hasUnresolvedParams,
-							PlannerRestrictionContext *plannerRestrictionContext)
+CreateDistributedPlan(uint64 planId, Query *originalQuery, Query *query, ParamListInfo
+					  boundParams, bool hasUnresolvedParams,
+					  PlannerRestrictionContext *plannerRestrictionContext)
 {
 	DistributedPlan *distributedPlan = NULL;
 	MultiTreeRoot *logicalPlan = NULL;
@@ -700,9 +698,9 @@ CreateDistributedSelectPlan(uint64 planId, Query *originalQuery, Query *query,
 		/* overwrite the old transformed query with the new transformed query */
 		memcpy(query, newQuery, sizeof(Query));
 
-		/* recurse into CreateDistributedSelectPlan with subqueries/CTEs replaced */
-		distributedPlan = CreateDistributedSelectPlan(planId, originalQuery, query, NULL,
-													  false, plannerRestrictionContext);
+		/* recurse into CreateDistributedPlan with subqueries/CTEs replaced */
+		distributedPlan = CreateDistributedPlan(planId, originalQuery, query, NULL, false,
+												plannerRestrictionContext);
 		distributedPlan->subPlanList = subPlanList;
 
 		return distributedPlan;
